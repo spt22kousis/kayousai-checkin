@@ -870,9 +870,13 @@ function toGray(img) {
  * 3. 對每個符號，把候選圖樣以高斯模糊「畫出來」，與實際亮度曲線做正規化相關（NCC），取最像的。
  * 4. 起始碼、終止碼都要對得上，最後用 mod 103 檢查碼驗證。
  */
-const C128 = (() => {
+// 寫成獨立函式，網頁可以用 makeC128.toString() 把它放進 Web Worker 執行
+function makeC128() {
   const PAT = [[2,1,2,2,2,2],[2,2,2,1,2,2],[2,2,2,2,2,1],[1,2,1,2,2,3],[1,2,1,3,2,2],[1,3,1,2,2,2],[1,2,2,2,1,3],[1,2,2,3,1,2],[1,3,2,2,1,2],[2,2,1,2,1,3],[2,2,1,3,1,2],[2,3,1,2,1,2],[1,1,2,2,3,2],[1,2,2,1,3,2],[1,2,2,2,3,1],[1,1,3,2,2,2],[1,2,3,1,2,2],[1,2,3,2,2,1],[2,2,3,2,1,1],[2,2,1,1,3,2],[2,2,1,2,3,1],[2,1,3,2,1,2],[2,2,3,1,1,2],[3,1,2,1,3,1],[3,1,1,2,2,2],[3,2,1,1,2,2],[3,2,1,2,2,1],[3,1,2,2,1,2],[3,2,2,1,1,2],[3,2,2,2,1,1],[2,1,2,1,2,3],[2,1,2,3,2,1],[2,3,2,1,2,1],[1,1,1,3,2,3],[1,3,1,1,2,3],[1,3,1,3,2,1],[1,1,2,3,1,3],[1,3,2,1,1,3],[1,3,2,3,1,1],[2,1,1,3,1,3],[2,3,1,1,1,3],[2,3,1,3,1,1],[1,1,2,1,3,3],[1,1,2,3,3,1],[1,3,2,1,3,1],[1,1,3,1,2,3],[1,1,3,3,2,1],[1,3,3,1,2,1],[3,1,3,1,2,1],[2,1,1,3,3,1],[2,3,1,1,3,1],[2,1,3,1,1,3],[2,1,3,3,1,1],[2,1,3,1,3,1],[3,1,1,1,2,3],[3,1,1,3,2,1],[3,3,1,1,2,1],[3,1,2,1,1,3],[3,1,2,3,1,1],[3,3,2,1,1,1],[3,1,4,1,1,1],[2,2,1,4,1,1],[4,3,1,1,1,1],[1,1,1,2,2,4],[1,1,1,4,2,2],[1,2,1,1,2,4],[1,2,1,4,2,1],[1,4,1,1,2,2],[1,4,1,2,2,1],[1,1,2,2,1,4],[1,1,2,4,1,2],[1,2,2,1,1,4],[1,2,2,4,1,1],[1,4,2,1,1,2],[1,4,2,2,1,1],[2,4,1,2,1,1],[2,2,1,1,1,4],[4,1,3,1,1,1],[2,4,1,1,1,2],[1,3,4,1,1,1],[1,1,1,2,4,2],[1,2,1,1,4,2],[1,2,1,2,4,1],[1,1,4,2,1,2],[1,2,4,1,1,2],[1,2,4,2,1,1],[4,1,1,2,1,2],[4,2,1,1,1,2],[4,2,1,2,1,1],[2,1,2,1,4,1],[2,1,4,1,2,1],[4,1,2,1,2,1],[1,1,1,1,4,3],[1,1,1,3,4,1],[1,3,1,1,4,1],[1,1,4,1,1,3],[1,1,4,3,1,1],[4,1,1,1,1,3],[4,1,1,3,1,1],[1,1,3,1,4,1],[1,1,4,1,3,1],[3,1,1,1,4,1],[4,1,1,1,3,1],[2,1,1,4,1,2],[2,1,1,2,1,4],[2,1,1,2,3,2],[2,3,3,1,1,1,2]];
   const STARTS = [103, 104, 105], STOP = 106;
+  // 時間上限：超過就放棄這一格（雜亂的畫面可能要試很多種假設）
+  const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+  let deadline = Infinity;
 
   // 常態分佈累積函數查表
   function erf(x) {
@@ -978,6 +982,7 @@ const C128 = (() => {
     // 資料符號與檢查碼
     const cand = new Float64Array(103);
     for (let k = 1; k < N; k++) {
+      if (now() > deadline) return null;
       for (let c = 0; c < 103; c++) {
         nb = put(bars, 0, prevPat, prevS, prevM, beta); nb = put(bars, nb, PAT[c], pos, m, beta); nb = putNext(bars, nb, pos + 11 * m, m, beta);
         cand[c] = ncc(P, pos - 2 * m, 14 * m, bars, nb, sigma);
@@ -1102,6 +1107,7 @@ const C128 = (() => {
     // 不採用「第一個通過的」，而是比較所有通過的假設取最像的；非常像（≥0.92）就直接採用
     let best = null;
     for (const h of hyps.slice(0, 24)) {
+      if (now() > deadline) break;
       const r = decodeHyp(P, h.L, h.R, h.N);
       if (r && (!best || r.mean > best.mean)) best = r;
       if (best && best.mean >= 0.92) break;
@@ -1135,6 +1141,7 @@ const C128 = (() => {
 
   function decode(gray, w, h, opts = {}) {
     const maxCand = opts.maxCandidates || 6, step = 4;
+    deadline = opts.budgetMs ? now() + opts.budgetMs : Infinity;
     const cands = [];
     const P = new Float32Array(w);
     for (let y = 3; y < h - 3; y += step) {
@@ -1157,6 +1164,7 @@ const C128 = (() => {
       if (chosen.length >= maxCand) break;
     }
     for (const c of chosen) {
+      if (now() > deadline) break;
       rowProfile(gray, w, h, c.y, 6, P);
       const r = decodeProfile(P, c);
       if (r) return { ...r, y: c.y, reversed: false };
@@ -1169,8 +1177,40 @@ const C128 = (() => {
   }
 
   return { decode, PAT };
-})();
+}
+const C128 = makeC128();
 /* BLUR-C128 END */
+
+// 模糊解碼器在 Web Worker（背景執行緒）裡跑，畫面和掃描槍輸入不會被卡住；不支援時退回主執行緒
+let blurWorker = null, blurReqId = 0;
+const blurPending = new Map();
+function blurDecode(gray, w, h) {
+  if (blurWorker === null) {
+    try {
+      const src = `const C128 = (${makeC128.toString()})();
+self.onmessage = e => {
+  const { id, gray, w, h } = e.data;
+  let r = null;
+  try { r = C128.decode(gray, w, h, { budgetMs: 150 }); } catch (err) {}
+  self.postMessage({ id, r });
+};`;
+      blurWorker = new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })));
+      blurWorker.onmessage = e => {
+        const done = blurPending.get(e.data.id);
+        if (done) { blurPending.delete(e.data.id); done(e.data.r); }
+      };
+      blurWorker.onerror = () => { blurWorker = false; for (const done of blurPending.values()) done(null); blurPending.clear(); };
+    } catch (e) {
+      blurWorker = false;
+    }
+  }
+  if (!blurWorker) return Promise.resolve(C128.decode(gray, w, h, { budgetMs: 80 }));
+  return new Promise(resolve => {
+    const id = ++blurReqId;
+    blurPending.set(id, resolve);
+    blurWorker.postMessage({ id, gray, w, h }, [gray.buffer]);
+  });
+}
 
 // 額外嘗試的輪替順序：偶數格試傾斜角度，奇數格試影像增強；模糊解碼器最有效，所以排比較多次
 const ENHANCE_PASSES = [{ blur: true }, { sharpen: [3, 1.5] }, { blur: true }, { sharpen: [5, 2] }, { blur: true }, { stretch: true }];
@@ -1197,7 +1237,7 @@ async function scanFrame(gen) {
         else if (p.blur) {
           if (!CONFIG.camera.formats.includes('Code128')) continue;
           drawRoi(r, 0);
-          const res = C128.decode(toGray(ctx2d.getImageData(0, 0, r.w, r.h)), r.w, r.h);
+          const res = await blurDecode(toGray(ctx2d.getImageData(0, 0, r.w, r.h)), r.w, r.h);
           hit = res ? { text: res.text, format: 'Code128', confirm: true } : null;
         }
         else { drawRoi(r, p.angle); hit = await engine.decode(canvas, ctx2d); }
